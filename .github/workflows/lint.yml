@@ -1,0 +1,71 @@
+name: lint
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate Claude plugin.json is valid JSON
+        run: jq empty .claude-plugin/plugin.json
+
+      - name: Validate Codex plugin.json is valid JSON
+        run: jq empty .codex-plugin/plugin.json
+
+      - name: Validate hooks.json is valid JSON
+        run: jq empty hooks/hooks.json
+
+      # FileChanged derives watch paths from a hook entry's `matcher` (split on
+      # "|" and joined to cwd), so a matcher there would register junk paths.
+      # See AGENTS.md.
+      - name: FileChanged hook must not declare a matcher
+        run: |
+          if jq -e '.hooks.FileChanged[]? | select(has("matcher"))' hooks/hooks.json >/dev/null; then
+            echo "::error::FileChanged hook entries must not declare a matcher"
+            exit 1
+          fi
+
+      - name: Check hook script syntax
+        run: |
+          node --check scripts/line-feed-guard-hook.mjs
+          node --check scripts/line-feed-guard-hook.test.mjs
+
+      - name: Validate every SKILL.md has YAML frontmatter
+        run: |
+          python3 - <<'EOF'
+          import glob, re, sys
+          paths = sorted(glob.glob("skills/*/SKILL.md"))
+          if not paths:
+              print("::error::no SKILL.md found under skills/"); sys.exit(1)
+          for p in paths:
+              text = open(p, encoding="utf-8").read()
+              m = re.match(r"^---\n(.*?)\n---\n", text, re.DOTALL)
+              if not m:
+                  print(f"::error::{p} missing YAML frontmatter"); sys.exit(1)
+              fm = m.group(1)
+              if "name:" not in fm or "description:" not in fm:
+                  print(f"::error::{p} frontmatter missing 'name' or 'description'"); sys.exit(1)
+              print(f"{p}: OK")
+          EOF
+
+      # The plugin exists to keep CRLF out of the files Claude Code parses.
+      # Shipping its own sources with CRLF would defeat the point.
+      - name: Repository sources must be LF
+        run: |
+          if grep -rlIU $'\r' --exclude-dir=.git . ; then
+            echo "::error::the files listed above contain CR bytes; this repo is LF-only"
+            exit 1
+          fi
+          echo "no CR bytes found"
+
+      - name: Run hook tests
+        run: node scripts/line-feed-guard-hook.test.mjs
