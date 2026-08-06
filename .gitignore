@@ -1,5 +1,6 @@
 .vscode/
 .idea/
+.serena/
 .DS_Store
 Thumbs.db
 *.log
