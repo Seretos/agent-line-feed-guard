@@ -42,14 +42,15 @@ On a find it converts CRLF to LF in place and tells the agent what it repaired a
 
 ### Scope
 
-Only the files the harness actually parses:
+The project's Claude configuration tree, plus the root marker files:
 
-- `<project>/.claude/{agents,skills,commands,hooks}/**`
-- `<project>/.claude/*.json` — including the gitignored `settings.local.json`
+- `<project>/.claude/**` — every file, not just `agents`/`skills`/`commands`/`hooks` (this is what catches `.claude/scripts/`, `.claude/output-styles/`, etc.)
+  - except `PROJECT_EXCLUDED_TOP_DIRS` (`projects`, `file-history`, `shell-snapshots`, `todos`, `statsig`, `plugins` — Claude-Code-internal churn dirs) and `VENDOR_DIRS` (`node_modules`, `.git`, `.venv`, `venv`, `__pycache__` — skipped at any depth)
+- `<project>/.claude/*.json` — including the gitignored `settings.local.json`, though that's now just one instance of the `.claude/**` rule above
 - `<project>/CLAUDE.md`, `AGENTS.md`, `CLAUDE.local.md`, `.mcp.json`
-- `~/.claude/{agents,skills,commands}/**`, `~/.claude/*.json`, `~/.claude/CLAUDE.md`
+- `~/.claude/{agents,skills,commands}/**`, `~/.claude/*.json`, `~/.claude/CLAUDE.md` — the user config dir stays deliberately narrow (see below)
 
-Never anything else. `.bat`, `.cmd` and `.reg` are excluded (CRLF is legitimate there), as are binary files and UTF-16 files — the latter are reported rather than transcoded. Because the scan descends only into `.claude/`, a Unity `Library/` or a `node_modules/` tree is unreachable by construction.
+Never anything else. `.bat`, `.cmd` and `.reg` are excluded (CRLF is legitimate there), as are binary files and UTF-16 files — the latter are reported rather than transcoded. Because the scan descends only into `.claude/`, a Unity `Library/` or a `node_modules/` tree is unreachable by construction, and `node_modules/`, `.git/`, `.venv/`, `venv/`, `__pycache__/` are skipped at any depth inside `.claude/` too.
 
 ## Install
 
