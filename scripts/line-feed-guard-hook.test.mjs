@@ -26,6 +26,7 @@ import {
   classifyBuffer,
   stripCrlf,
   inspectAndFix,
+  scanFiles,
   relDisplay,
   isAgentFile,
   isSkillOrCommandFile,
@@ -236,6 +237,20 @@ test("inspectAndFix honours dry-run", () => {
   assert(hasCR(f), "file must still have CRLF in dry-run");
 });
 
+test("inspectAndFix on a directory is skipped, never reported", () => {
+  const root = mkTmp();
+  const dir = path.join(root, ".claude", "agents");
+  fs.mkdirSync(dir, { recursive: true });
+  const r = inspectAndFix(dir, false);
+  assertEqual(r.status, "skipped", "status");
+  assert(typeof r.error === "string" && r.error.length > 0, "must carry an error message");
+
+  const report = scanFiles([dir], false);
+  assertEqual(report.fixed, [], "directory never counted as fixed");
+  assertEqual(report.unfixed, [], "directory never counted as unfixed");
+  assertEqual(report.utf16, [], "directory never counted as utf16");
+});
+
 // ---------------------------------------------------------------------------
 // isInScope
 // ---------------------------------------------------------------------------
@@ -268,7 +283,6 @@ test("out of scope: source files, .claude/projects, nested node_modules/.claude"
     "docs/CLAUDE.md",
     ".claude/projects/slug/memory/note.md",
     "node_modules/pkg/.claude/agents/x.md",
-    ".claude/agents",
   ]) {
     assert(!isInScope(path.join(root, ...rel.split("/")), roots), `expected out of scope: ${rel}`);
   }
@@ -277,8 +291,27 @@ test("out of scope: source files, .claude/projects, nested node_modules/.claude"
 test("out of scope: extensions where CRLF is legitimate", () => {
   const root = mkTmp();
   const roots = projectRoots(root);
-  for (const rel of [".claude/hooks/x.bat", ".claude/hooks/y.cmd", ".claude/agents/z.reg"]) {
+  for (const rel of [
+    ".claude/hooks/x.bat",
+    ".claude/hooks/y.cmd",
+    ".claude/agents/z.reg",
+    ".claude/scripts/x.bat",
+  ]) {
     assert(!isInScope(path.join(root, ...rel.split("/")), roots), `expected out of scope: ${rel}`);
+  }
+});
+
+test("in scope: any subdir of a project .claude/, not just the four named", () => {
+  const root = mkTmp();
+  const roots = projectRoots(root);
+  for (const rel of [
+    ".claude/scripts/build.mjs",
+    ".claude/scripts/lib/util.mjs",
+    ".claude/output-styles/x.md",
+    ".claude/.gitignore",
+    ".claude/notes.md",
+  ]) {
+    assert(isInScope(path.join(root, ...rel.split("/")), roots), `expected in scope: ${rel}`);
   }
 });
 
@@ -305,6 +338,76 @@ test("config-kind root treats its own dir as the .claude dir", () => {
   assert(isInScope(path.join(cfg, "CLAUDE.md"), roots), "user CLAUDE.md");
   assert(!isInScope(path.join(cfg, "projects", "slug", "memory", "m.md"), roots), "projects/");
   assert(!isInScope(path.join(cfg, "shell-snapshots", "s.sh"), roots), "shell-snapshots/");
+});
+
+test("config-kind scope stays narrow after the project widening", () => {
+  const cfg = mkTmp();
+  writeFile(cfg, "scripts/x.mjs", "x");
+  writeFile(cfg, "output-styles/o.md", "x");
+  writeFile(cfg, "projects/slug/memory/m.md", "x");
+  writeFile(cfg, "file-history/h.json", "{}");
+  writeFile(cfg, "shell-snapshots/s.sh", "x");
+  writeFile(cfg, "notes.md", "x");
+  writeFile(cfg, "agents/global.md", "x");
+  writeFile(cfg, "hooks/h.md", "x");
+  writeFile(cfg, "settings.json", "{}");
+  writeFile(cfg, "CLAUDE.md", "x");
+
+  const roots = [{ kind: "config", dir: cfg }];
+  for (const rel of ["scripts/x.mjs", "output-styles/o.md", "projects/slug/memory/m.md", "file-history/h.json", "shell-snapshots/s.sh", "notes.md"]) {
+    assert(!isInScope(path.join(cfg, ...rel.split("/")), roots), `expected out of scope: ${rel}`);
+  }
+  for (const rel of ["agents/global.md", "hooks/h.md", "settings.json", "CLAUDE.md"]) {
+    assert(isInScope(path.join(cfg, ...rel.split("/")), roots), `expected in scope: ${rel}`);
+  }
+
+  const found = enumerateScope(roots)
+    .map((p) => path.relative(cfg, p).split(path.sep).join("/"))
+    .sort();
+  assertEqual(found, ["CLAUDE.md", "agents/global.md", "hooks/h.md", "settings.json"], "config enumeration stays narrow");
+});
+
+test("excluded top dirs under a project .claude/ are never enumerated", () => {
+  const root = mkTmp();
+  const roots = projectRoots(root);
+  for (const sub of ["projects", "file-history", "shell-snapshots", "todos", "statsig", "plugins"]) {
+    const rel = `.claude/${sub}/x.md`;
+    assert(!isInScope(path.join(root, ...rel.split("/")), roots), `expected out of scope: ${rel}`);
+  }
+});
+
+test("vendor dirs are skipped at any depth", () => {
+  const root = mkTmp();
+  const roots = projectRoots(root);
+  for (const rel of [
+    ".claude/node_modules/pkg/index.js",
+    ".claude/scripts/node_modules/pkg/index.js",
+    ".claude/scripts/.git/config",
+    ".claude/scripts/__pycache__/m.pyc",
+  ]) {
+    assert(!isInScope(path.join(root, ...rel.split("/")), roots), `expected out of scope: ${rel}`);
+  }
+
+  // Direct walkDir assertion for the any-depth vendor skip.
+  writeFile(root, ".claude/scripts/node_modules/pkg/index.js", "x");
+  writeFile(root, ".claude/scripts/tool.mjs", "x");
+  const out = [];
+  walkDir(path.join(root, ".claude", "scripts"), 0, out, { count: 0 });
+  const names = out.map((p) => path.basename(p)).sort();
+  assertEqual(names, ["tool.mjs"], "vendor dir excluded from walkDir");
+});
+
+test("excluded-name matching is case-insensitive", () => {
+  const root = mkTmp();
+  const roots = projectRoots(root);
+  assert(
+    !isInScope(path.join(root, ".claude", "Projects", "p", "m.md"), roots),
+    "Projects/ (mixed case) excluded"
+  );
+  assert(
+    !isInScope(path.join(root, ".claude", "scripts", "Node_Modules", "x.js"), roots),
+    "Node_Modules/ (mixed case) excluded"
+  );
 });
 
 test("LINE_FEED_GUARD_EXTRA_ROOTS adds absolute roots only", () => {
@@ -350,6 +453,59 @@ test("returns exactly the in-scope set, ignoring sibling junk", () => {
 
 test("no .claude directory yields an empty list without throwing", () => {
   assertEqual(enumerateScope(projectRoots(mkTmp())), [], "empty root");
+});
+
+test("enumerateScope walks the whole project .claude/, including .claude/scripts", () => {
+  const root = mkTmp();
+  writeFile(root, ".claude/agents/a.md", "x");
+  writeFile(root, ".claude/skills/s/SKILL.md", "x");
+  writeFile(root, ".claude/commands/c.md", "x");
+  writeFile(root, ".claude/hooks/h.md", "x");
+  writeFile(root, ".claude/scripts/tool.mjs", "x");
+  writeFile(root, ".claude/scripts/deep/nested.py", "x");
+  writeFile(root, ".claude/output-styles/s.md", "x");
+  writeFile(root, ".claude/notes.md", "x");
+  writeFile(root, ".claude/scripts/skip.bat", "x");
+
+  const found = enumerateScope(projectRoots(root))
+    .map((p) => path.relative(root, p).split(path.sep).join("/"))
+    .sort();
+  assertEqual(
+    found,
+    [
+      ".claude/agents/a.md",
+      ".claude/commands/c.md",
+      ".claude/hooks/h.md",
+      ".claude/notes.md",
+      ".claude/output-styles/s.md",
+      ".claude/scripts/deep/nested.py",
+      ".claude/scripts/tool.mjs",
+      ".claude/skills/s/SKILL.md",
+    ],
+    "widened enumeration"
+  );
+});
+
+test("MAX_DEPTH still bounds a deep new subtree", () => {
+  const root = mkTmp();
+  const deep =
+    ".claude/output-styles/" + Array.from({ length: 20 }, (_, i) => `d${i}`).join("/") + "/x.md";
+  writeFile(root, deep, "x");
+  const found = enumerateScope(projectRoots(root));
+  assertEqual(found, [], "file below MAX_DEPTH must not be collected");
+});
+
+test("the four named subdirs are enumerated before the rest of .claude/", () => {
+  const root = mkTmp();
+  writeFile(root, ".claude/agents/a.md", "x");
+  writeFile(root, ".claude/zzz-other/x.md", "x");
+  const found = enumerateScope(projectRoots(root)).map((p) =>
+    path.relative(root, p).split(path.sep).join("/")
+  );
+  const agentIdx = found.indexOf(".claude/agents/a.md");
+  const otherIdx = found.indexOf(".claude/zzz-other/x.md");
+  assert(agentIdx !== -1 && otherIdx !== -1, "both files enumerated");
+  assert(agentIdx < otherIdx, "phase 1 (named dirs) must precede phase 2 (the rest)");
 });
 
 test("walkDir stops once the budget is exhausted", () => {
@@ -489,6 +645,77 @@ test("Bash: full scan fixes a CRLF agent file the command never named", () => {
   const out = parseOut(res.stdout);
   assertEqual(out.hookSpecificOutput.hookEventName, "PostToolUse", "event name");
   assert(out.hookSpecificOutput.additionalContext.includes("reviewer.md"), "names the file");
+});
+
+test("Bash: full scan repairs a CRLF file under .claude/scripts/", () => {
+  const p = mkProject();
+  const f = writeFile(p.root, ".claude/scripts/build.mjs", Buffer.from("a\r\nb\r\n"));
+  const res = runHook(
+    {
+      hook_event_name: "PostToolUse",
+      session_id: "s-scripts-bash",
+      cwd: p.root,
+      tool_name: "Bash",
+      tool_input: { command: "pwsh -c ..." },
+    },
+    sandboxEnv(p)
+  );
+  assertEqual(res.status, 0, "exit code");
+  assert(!hasCR(f), "file under .claude/scripts/ must be LF after the hook");
+  const out = parseOut(res.stdout);
+  assert(out.hookSpecificOutput.additionalContext.includes("build.mjs"), "names the file");
+
+  // Idempotence: a second identical run must be silent for the new path too.
+  const second = runHook(
+    {
+      hook_event_name: "PostToolUse",
+      session_id: "s-scripts-bash",
+      cwd: p.root,
+      tool_name: "Bash",
+      tool_input: { command: "pwsh -c ..." },
+    },
+    sandboxEnv(p)
+  );
+  assertEqual(second.stdout.trim(), "", "second run over .claude/scripts/ must be silent");
+});
+
+test("Write under .claude/scripts/ is repaired on the single-file path", () => {
+  const p = mkProject();
+  const f = writeFile(p.root, ".claude/scripts/build.mjs", Buffer.from("a\r\nb\r\n"));
+  const res = runHook(
+    {
+      hook_event_name: "PostToolUse",
+      session_id: "s-scripts-write",
+      cwd: p.root,
+      tool_name: "Write",
+      tool_input: { file_path: f },
+    },
+    sandboxEnv(p)
+  );
+  assert(!hasCR(f), "file must be LF after the single-file path");
+  assert(parseOut(res.stdout).hookSpecificOutput.additionalContext.includes("build.mjs"), "named");
+});
+
+test("FileChanged repairs a file under .claude/scripts/", () => {
+  const p = mkProject();
+  const f = writeFile(p.root, ".claude/scripts/build.mjs", Buffer.from("a\r\nb\r\n"));
+  const res = runHook(
+    {
+      hook_event_name: "FileChanged",
+      session_id: "s-scripts-fc",
+      cwd: p.root,
+      file_path: f,
+      event: "change",
+    },
+    sandboxEnv(p)
+  );
+  assert(!hasCR(f), "file must be LF after FileChanged");
+  const out = parseOut(res.stdout);
+  assert(typeof out.systemMessage === "string", "systemMessage is the only channel");
+  assert(
+    out.hookSpecificOutput === undefined,
+    "FileChanged output union has no additionalContext — emit nothing there"
+  );
 });
 
 test("PowerShell is handled on the same full-scan path as Bash", () => {

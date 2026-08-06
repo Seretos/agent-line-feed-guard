@@ -2,11 +2,12 @@
 name: scan
 description: >
   Scan and repair CRLF line endings across every file Claude Code parses
-  (.claude/agents, .claude/skills, .claude/commands, .claude/settings*.json,
-  CLAUDE.md, AGENTS.md) and report which files the harness was silently
-  ignoring. Use when a subagent, skill, or command is unexpectedly missing or
-  "does not exist", after a clone, checkout, merge or rebase, when the user asks
-  about line endings or CRLF, or when a file was just written from PowerShell.
+  (the project's whole .claude/ tree, CLAUDE.md, AGENTS.md, and the
+  user-level ~/.claude/{agents,skills,commands}) and report which files the
+  harness was silently ignoring. Use when a subagent, skill, or command is
+  unexpectedly missing or "does not exist", after a clone, checkout, merge or
+  rebase, when the user asks about line endings or CRLF, or when a file was
+  just written from PowerShell.
 ---
 
 # scan — on-demand CRLF sweep
@@ -44,8 +45,9 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/line-feed-guard-hook.mjs" --scan /path/to/pr
 
 To report without writing anything, set `LINE_FEED_GUARD_DRY_RUN=1`.
 
-The scan covers the project's `.claude/` tree, the root `CLAUDE.md` / `AGENTS.md`
-/ `.mcp.json`, and the user-level `~/.claude/{agents,skills,commands}` — user
+The scan covers the whole `.claude/` tree — including `.claude/scripts/` and
+any other subdirectory you keep there — the root `CLAUDE.md` / `AGENTS.md` /
+`.mcp.json`, and the user-level `~/.claude/{agents,skills,commands}` — user
 agents fail exactly the same way and are easy to overlook.
 
 ## Reading the output
